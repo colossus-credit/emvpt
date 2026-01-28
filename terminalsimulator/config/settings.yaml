@@ -31,7 +31,7 @@ terminal:
     pin_entry_required_and_pin_pad_not_present_or_not_working: false
     pin_entry_required_pin_pad_present_but_pin_was_not_entered: false
     online_pin_entered: false
-    transaction_exceeds_floor_limit: true
+    transaction_exceeds_floor_limit: false
     lower_consecutive_offline_limit_exceeded: false
     upper_consecutive_offline_limit_exceeded: false
     transaction_selected_randomly_for_online_processing: false
@@ -84,3 +84,6 @@ default_tags:
   '5F2A': '0840'
   '9C': '00'
   '9F35': '22'
+  '9F1C': '3132333435363738'
+  '9F16': '202020202020202020202020202020'
+  '9F01': '000001234567'
