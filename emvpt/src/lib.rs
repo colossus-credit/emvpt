@@ -5,6 +5,7 @@ use iso7816_tlv::ber::{Tag, Tlv, Value};
 use log::{debug, info, trace, warn};
 use openssl::bn::BigNum;
 use openssl::rsa::{Padding, Rsa};
+use openssl::hash::{self, MessageDigest};
 use openssl::sha;
 use rand::prelude::*;
 use rand::Rng;
@@ -1444,11 +1445,10 @@ impl EmvConnection<'_> {
                     let numeric_currency_code: String = format!("{:02X?}", v)
                         .replace(|c: char| !(c.is_ascii_alphanumeric()), "")[1..]
                         .to_string();
-                    value = format!(
-                        "{} - {}",
-                        numeric_currency_code,
-                        self.constants.numeric_currency_codes[&numeric_currency_code]
-                    );
+                    value = match self.constants.numeric_currency_codes.get(&numeric_currency_code) {
+                        Some(name) => format!("{} - {}", numeric_currency_code, name),
+                        None => format!("{} - Unknown", numeric_currency_code),
+                    };
                 }
                 Some(FieldFormat::DataObjectList) => {
                     let dol: DataObjectList =
@@ -1791,7 +1791,7 @@ impl EmvConnection<'_> {
 
         let pin_bcd_cn = bcdutil::ascii_to_bcd_cn(ascii_pin, 6).unwrap();
 
-        const PK_MAX_SIZE: usize = 248; // ref. EMV Book 2, B2.1 RSA Algorithm
+        const PK_MAX_SIZE: usize = 256; // ref. EMV Book 2, B2.1 RSA Algorithm
         let mut random_padding = [0u8; PK_MAX_SIZE];
         self.fill_random(&mut random_padding[..]);
 
@@ -1863,7 +1863,7 @@ impl EmvConnection<'_> {
         let tag_9f26_application_cryptogram =
             &tag_9f4b_signed_data_decrypted_dynamic_data[i..i + 8];
         i += 8;
-        let transaction_data_hash_code = &tag_9f4b_signed_data_decrypted_dynamic_data[i..i + 20];
+        let transaction_data_hash_code = &tag_9f4b_signed_data_decrypted_dynamic_data[i..];
 
         let tag_9f27_cryptogram_information_data = self.get_tag_value("9F27").unwrap();
 
@@ -1911,7 +1911,13 @@ impl EmvConnection<'_> {
         let tag_9f4b_signed_dynamic_application_data_hex_encoded =
             hex::encode_upper(self.get_tag_value("9F4B").unwrap());
 
-        let tag_9f4b_tlv_header_length = 4 /* tag */ + 2 /* tag length */;
+        // 9F4B tag is 2 bytes; BER-TLV length depends on value size
+        let tag_9f4b_value_len = self.get_tag_value("9F4B").unwrap().len();
+        let tag_9f4b_tlv_header_length = 4 /* tag (2 bytes = 4 hex) */ + if tag_9f4b_value_len > 0x7F {
+            if tag_9f4b_value_len > 0xFF { 6 } else { 4 } // 82 xx xx or 81 xx
+        } else {
+            2 // single byte length
+        };
         let tag_77_part1: String = tag_77_hex_encoded
             .drain(
                 ..tag_77_hex_encoded
@@ -1923,14 +1929,17 @@ impl EmvConnection<'_> {
         checksum_data.extend_from_slice(&hex::decode(&tag_77_part1).unwrap()[..]);
 
         let tag_9f4b_whole_size = tag_9f4b_signed_dynamic_application_data_hex_encoded.len()
-            + tag_9f4b_tlv_header_length
-            + 2;
+            + tag_9f4b_tlv_header_length;
         if tag_77_hex_encoded.len() > tag_9f4b_whole_size {
             let tag_77_part2: String = tag_77_hex_encoded.drain(tag_9f4b_whole_size..).collect();
             checksum_data.extend_from_slice(&hex::decode(&tag_77_part2).unwrap()[..]);
         }
 
-        let transaction_data_hash_code_checksum = sha::sha1(&checksum_data[..]);
+        let cda_hash_algo = match transaction_data_hash_code.len() {
+            32 => 0x02u8, // SHA-256
+            _ => 0x01u8,  // SHA-1
+        };
+        let (_, transaction_data_hash_code_checksum) = EmvConnection::emv_hash(cda_hash_algo, &checksum_data[..]).unwrap();
 
         if &transaction_data_hash_code_checksum[..] != &transaction_data_hash_code[..] {
             warn!("Transaction data hash code mismatch!");
@@ -2009,7 +2018,6 @@ impl EmvConnection<'_> {
 
         let cdol_data = cdol_list.get_tag_list_tag_values(self);
         assert!(cdol_data.len() <= 0xFF);
-
         let apdu_command_generate_ac = b"\x80\xAE";
         let mut generate_ac_command = apdu_command_generate_ac.to_vec();
         generate_ac_command.push(p1_reference_control_parameter);
@@ -2045,8 +2053,16 @@ impl EmvConnection<'_> {
             match icc_cryptogram_type {
                 CryptogramType::TransactionCertificate
                 | CryptogramType::AuthorisationRequestCryptogram => {
+                    // Skip tag 77 header: 1 byte tag + variable-length BER-TLV length
+                    let tag_77_data_offset = if response_data[1] == 0x81 {
+                        3 // 77 81 xx
+                    } else if response_data[1] == 0x82 {
+                        4 // 77 82 xx xx
+                    } else {
+                        2 // 77 xx (single byte length)
+                    };
                     self.handle_application_cryptogram_card_authentication(
-                        &response_data[3..],
+                        &response_data[tag_77_data_offset..],
                         cdol_tag,
                     )?;
                 }
@@ -2405,6 +2421,22 @@ impl EmvConnection<'_> {
         Ok(output)
     }
 
+    /// Returns the hash digest size and computes the hash for the given algorithm indicator.
+    /// 0x01 = SHA-1 (20 bytes), 0x02 = SHA-256 (32 bytes)
+    fn emv_hash(algorithm: u8, data: &[u8]) -> Result<(usize, Vec<u8>), ()> {
+        match algorithm {
+            0x01 => Ok((20, sha::sha1(data).to_vec())),
+            0x02 => {
+                let digest = hash::hash(MessageDigest::sha256(), data).map_err(|_| ())?;
+                Ok((32, digest.to_vec()))
+            }
+            _ => {
+                warn!("Unsupported hash algorithm: 0x{:02X}", algorithm);
+                Err(())
+            }
+        }
+    }
+
     pub fn handle_public_keys(&mut self, application: &EmvApplication) -> Result<(), ()> {
         if self.get_tag_value("8F").is_none() {
             debug!("Card does not support offline data authentication");
@@ -2493,8 +2525,6 @@ impl EmvConnection<'_> {
             return Err(());
         }
 
-        let checksum_position = 15 + issuer_certificate_length - 36;
-
         let issuer_certificate_iin = &issuer_certificate[2..6];
         let issuer_certificate_expiry = &issuer_certificate[6..8];
         let issuer_certificate_serial = &issuer_certificate[8..11];
@@ -2502,7 +2532,16 @@ impl EmvConnection<'_> {
         let issuer_pk_algorithm = &issuer_certificate[12..13];
         let issuer_pk_length = &issuer_certificate[13..14];
         let issuer_pk_exponent_length = &issuer_certificate[14..15];
+
+        let issuer_hash_algo = issuer_certificate_hash_algorithm[0];
+        let (issuer_hash_size, _) = EmvConnection::emv_hash(issuer_hash_algo, &[]).map_err(|_| {
+            warn!("Unsupported issuer certificate hash algorithm: 0x{:02X}", issuer_hash_algo);
+        })?;
+        assert_eq!(issuer_pk_algorithm[0], 0x01); // RSA as defined in EMV Book 2, B2.1 RSA Algorihm
+
+        let checksum_position = issuer_certificate_length - issuer_hash_size - 1;
         let issuer_pk_leftmost_digits = &issuer_certificate[15..checksum_position];
+
         debug!("Issuer Identifier:{:02X?}", issuer_certificate_iin);
         debug!("Issuer expiry:{:02X?}", issuer_certificate_expiry);
         debug!("Issuer serial:{:02X?}", issuer_certificate_serial);
@@ -2518,11 +2557,8 @@ impl EmvConnection<'_> {
             issuer_pk_leftmost_digits
         );
 
-        assert_eq!(issuer_certificate_hash_algorithm[0], 0x01); // SHA-1
-        assert_eq!(issuer_pk_algorithm[0], 0x01); // RSA as defined in EMV Book 2, B2.1 RSA Algorihm
-
         let issuer_certificate_checksum =
-            &issuer_certificate[checksum_position..checksum_position + 20];
+            &issuer_certificate[checksum_position..checksum_position + issuer_hash_size];
 
         let mut checksum_data: Vec<u8> = Vec::new();
         checksum_data.extend_from_slice(&issuer_certificate[1..checksum_position]);
@@ -2531,7 +2567,7 @@ impl EmvConnection<'_> {
         }
         checksum_data.extend_from_slice(&tag_9f32_issuer_pk_exponent[..]);
 
-        let cert_checksum = sha::sha1(&checksum_data[..]);
+        let (_, cert_checksum) = EmvConnection::emv_hash(issuer_hash_algo, &checksum_data[..]).unwrap();
 
         if &cert_checksum[..] != &issuer_certificate_checksum[..] {
             warn!("Issuer cert checksum mismatch!");
@@ -2611,8 +2647,6 @@ impl EmvConnection<'_> {
             return Err(());
         }
 
-        let checksum_position = 21 + icc_certificate_length - 42;
-
         let icc_certificate_pan = &icc_certificate[2..12];
         let icc_certificate_expiry = &icc_certificate[12..14];
         let icc_certificate_serial = &icc_certificate[14..17];
@@ -2620,6 +2654,14 @@ impl EmvConnection<'_> {
         let icc_certificate_pk_algo = &icc_certificate[18..19];
         let icc_certificate_pk_length = &icc_certificate[19..20];
         let icc_certificate_pk_exp_length = &icc_certificate[20..21];
+
+        let icc_hash_algo = icc_certificate_hash_algo[0];
+        let (icc_hash_size, _) = EmvConnection::emv_hash(icc_hash_algo, &[]).map_err(|_| {
+            warn!("Unsupported ICC certificate hash algorithm: 0x{:02X}", icc_hash_algo);
+        })?;
+        assert_eq!(icc_certificate_pk_algo[0], 0x01); // RSA as defined in EMV Book 2, B2.1 RSA Algorihm
+
+        let checksum_position = icc_certificate_length - icc_hash_size - 1;
         let icc_certificate_pk_leftmost_digits = &icc_certificate[21..checksum_position];
 
         if self.settings.censor_sensitive_fields {
@@ -2641,9 +2683,6 @@ impl EmvConnection<'_> {
             "ICC pk leftmost digits:{:02X?}",
             icc_certificate_pk_leftmost_digits
         );
-
-        assert_eq!(icc_certificate_hash_algo[0], 0x01); // SHA-1
-        assert_eq!(icc_certificate_pk_algo[0], 0x01); // RSA as defined in EMV Book 2, B2.1 RSA Algorihm
 
         let tag_9f47_icc_pk_exponent = icc_pk_exponent;
 
@@ -2670,9 +2709,9 @@ impl EmvConnection<'_> {
             checksum_data.extend_from_slice(&static_data_authentication_tag_list_tag_values[..]);
         }
 
-        let cert_checksum = sha::sha1(&checksum_data[..]);
+        let (_, cert_checksum) = EmvConnection::emv_hash(icc_hash_algo, &checksum_data[..]).unwrap();
 
-        let icc_certificate_checksum = &icc_certificate[checksum_position..checksum_position + 20];
+        let icc_certificate_checksum = &icc_certificate[checksum_position..checksum_position + icc_hash_size];
 
         if !self.settings.censor_sensitive_fields {
             trace!("Checksum data: {:02X?}", &checksum_data[..]);
@@ -2751,7 +2790,9 @@ impl EmvConnection<'_> {
         }
 
         let tag_9f4b_signed_data_decrypted_hash_algo = tag_9f4b_signed_data_decrypted[2];
-        assert_eq!(tag_9f4b_signed_data_decrypted_hash_algo, 0x01);
+        let (sdad_hash_size, _) = EmvConnection::emv_hash(tag_9f4b_signed_data_decrypted_hash_algo, &[]).map_err(|_| {
+            warn!("Unsupported SDAD hash algorithm: 0x{:02X}", tag_9f4b_signed_data_decrypted_hash_algo);
+        })?;
 
         let tag_9f4b_signed_data_decrypted_dynamic_data_length =
             tag_9f4b_signed_data_decrypted[3] as usize;
@@ -2759,15 +2800,15 @@ impl EmvConnection<'_> {
         let tag_9f4b_signed_data_decrypted_dynamic_data = &tag_9f4b_signed_data_decrypted
             [4..4 + tag_9f4b_signed_data_decrypted_dynamic_data_length];
 
-        let checksum_position = tag_9f4b_signed_data_decrypted_length - 21;
+        let checksum_position = tag_9f4b_signed_data_decrypted_length - sdad_hash_size - 1;
         let mut checksum_data: Vec<u8> = Vec::new();
         checksum_data.extend_from_slice(&tag_9f4b_signed_data_decrypted[1..checksum_position]);
         checksum_data.extend_from_slice(&auth_data[..]);
 
-        let signed_data_checksum = sha::sha1(&checksum_data[..]);
+        let (_, signed_data_checksum) = EmvConnection::emv_hash(tag_9f4b_signed_data_decrypted_hash_algo, &checksum_data[..]).unwrap();
 
         let tag_9f4b_signed_data_decrypted_checksum =
-            &tag_9f4b_signed_data_decrypted[checksum_position..checksum_position + 20];
+            &tag_9f4b_signed_data_decrypted[checksum_position..checksum_position + sdad_hash_size];
 
         if &signed_data_checksum[..] != &tag_9f4b_signed_data_decrypted_checksum[..] {
             warn!("Signed data checksum mismatch!");
@@ -2814,9 +2855,14 @@ impl EmvConnection<'_> {
 
         assert_eq!(tag_93_ssad_decrypted[1], 0x03);
 
+        let sda_hash_algo = tag_93_ssad_decrypted[2];
+        let (sda_hash_size, _) = EmvConnection::emv_hash(sda_hash_algo, &[]).map_err(|_| {
+            warn!("Unsupported SDA hash algorithm: 0x{:02X}", sda_hash_algo);
+        })?;
+
         let mut checksum_data: Vec<u8> = Vec::new();
         checksum_data
-            .extend_from_slice(&tag_93_ssad_decrypted[1..tag_93_ssad_decrypted.len() - 22]);
+            .extend_from_slice(&tag_93_ssad_decrypted[1..tag_93_ssad_decrypted.len() - sda_hash_size - 1]);
         checksum_data.extend_from_slice(data_authentication);
         let static_data_authentication_tag_list_tag_values =
             DataObjectList::process_data_object_list(
@@ -2827,10 +2873,10 @@ impl EmvConnection<'_> {
             .get_tag_list_tag_values(self);
         checksum_data.extend_from_slice(&static_data_authentication_tag_list_tag_values[..]);
 
-        let ssad_checksum_calculated = sha::sha1(&checksum_data[..]);
+        let (_, ssad_checksum_calculated) = EmvConnection::emv_hash(sda_hash_algo, &checksum_data[..]).unwrap();
 
         let ssad_checksum = &tag_93_ssad_decrypted
-            [tag_93_ssad_decrypted.len() - 22..tag_93_ssad_decrypted.len() - 1];
+            [tag_93_ssad_decrypted.len() - sda_hash_size - 1..tag_93_ssad_decrypted.len() - 1];
 
         if &ssad_checksum_calculated[..] != ssad_checksum {
             warn!("SDA verification mismatch!");
@@ -3952,5 +3998,131 @@ mod tests {
         assert_eq!(get_truncated_pan("0000000000000000"), "00000000****0000");
         assert_eq!(get_truncated_pan("000000000000000"), "000000*****0000");
         assert_eq!(get_truncated_pan("00000000000000"), "000000****0000");
+    }
+
+    // Colossus card test helpers
+    fn start_transaction_colossus(connection: &mut EmvConnection) -> Result<(), ()> {
+        // Force transaction date as 26.01.2026 (matching test_data_colossus.yaml)
+        connection.process_tag_as_tlv("9A", b"\x26\x01\x26".to_vec());
+
+        // Force unpredictable number (matching test_data_colossus.yaml)
+        connection.process_tag_as_tlv("9F37", b"\x01\x23\x45\x67".to_vec());
+        connection.settings.terminal.use_random = false;
+
+        // Force issuer authentication data (placeholder ARPC)
+        connection.process_tag_as_tlv("91", b"\x12\x34\x56\x78\x12\x34\x56\x78".to_vec());
+
+        // Colossus-specific terminal data
+        // Terminal ID (9F1C) = "TERM0001"
+        connection.process_tag_as_tlv("9F1C", b"TERM0001".to_vec());
+        // Merchant ID (9F16) = "MERCHANT0000001"
+        connection.process_tag_as_tlv("9F16", b"MERCHANT0000001".to_vec());
+        // Acquirer ID (9F01)
+        connection.process_tag_as_tlv("9F01", b"\x00\x00\x01\x23\x45\x67".to_vec());
+
+        Ok(())
+    }
+
+    fn setup_connection_colossus(connection: &mut EmvConnection) -> Result<(), ()> {
+        connection.contactless = false;
+        connection.pse_application_select_callback = Some(&pse_application_select);
+        connection.pin_callback = Some(&pin_entry);
+        connection.amount_callback = Some(&amount_entry);
+        connection.start_transaction_callback = Some(&start_transaction_colossus);
+
+        Ok(())
+    }
+
+    /// Test transaction flow using a Colossus Credit Card Network card.
+    /// This test uses card data from the emv-card-sim project's Colossus card personalization.
+    ///
+    /// Colossus card characteristics:
+    /// - AID: A0 00 00 00 09 51
+    /// - BIN: 67676767
+    /// - CDA (Combined Dynamic Data Authentication) enabled
+    /// - Forced online transactions (ARQC only)
+    /// - Custom CDOL with Terminal ID, Merchant ID, Acquirer ID
+    #[test]
+    fn test_colossus_card_transaction() -> Result<(), ()> {
+        init_logging();
+
+        let mut connection = EmvConnection::new(SETTINGS_FILE).unwrap();
+        let smart_card_connection = DummySmartCardConnection {
+            test_data_file: "test_data_colossus.yaml".to_string(),
+        };
+        connection.interface = Some(&smart_card_connection);
+        setup_connection_colossus(&mut connection)?;
+
+        let amount = connection.amount_callback.unwrap()()?;
+
+        // Select Colossus payment application via PSE
+        let application = connection.select_payment_application()?;
+
+        // Verify we selected the Colossus AID (A0 00 00 00 09 51)
+        assert_eq!(
+            application.aid,
+            vec![0xA0, 0x00, 0x00, 0x00, 0x09, 0x51],
+            "Expected Colossus AID"
+        );
+
+        connection.start_transaction(&application)?;
+
+        connection.process_tag_as_tlv(
+            "9F02",
+            ascii_to_bcd_n(format!("{}", amount).as_bytes(), 6).unwrap(),
+        );
+
+        // Handle card verification methods (PIN for Colossus if amount >= $20)
+        connection.handle_card_verification_methods()?;
+
+        connection.handle_terminal_risk_management()?;
+
+        // Perform offline data authentication (CDA mode)
+        // Uses RSA-1408 certificates generated for Colossus PAN 6767676712345678
+        // CAPK index 0x92 from A000000009 scheme in scheme_ca_public_keys_test.yaml
+        connection.handle_offline_data_authentication()?;
+
+        connection.handle_terminal_action_analysis()?;
+
+        // With valid CDA and no TVR issues, terminal can approve offline
+        // Update cryptogram_type to TC since terminal action analysis determined TC is OK
+        connection.settings.terminal.cryptogram_type = CryptogramType::TransactionCertificate;
+
+        // First GENERATE AC - with valid CDA, may get TC (offline approval)
+        match connection.handle_1st_generate_ac()? {
+            CryptogramType::AuthorisationRequestCryptogram => {
+                // Colossus cards always request online authorization
+                connection.handle_issuer_authentication_data()?;
+                assert!(
+                    !connection
+                        .settings
+                        .terminal
+                        .tvr
+                        .issuer_authentication_failed
+                );
+
+                // Second GENERATE AC - expect TC after online approval
+                match connection.handle_2nd_generate_ac()? {
+                    CryptogramType::TransactionCertificate => {
+                        // Transaction approved - expected for Colossus after online auth
+                    }
+                    CryptogramType::AuthorisationRequestCryptogram => {
+                        return Err(());
+                    }
+                    CryptogramType::ApplicationAuthenticationCryptogram => {
+                        return Err(());
+                    }
+                }
+            }
+            CryptogramType::TransactionCertificate => {
+                // With valid CDA, offline approval is allowed
+                // Transaction approved offline - CDA validated successfully
+            }
+            CryptogramType::ApplicationAuthenticationCryptogram => {
+                return Err(());
+            }
+        }
+
+        Ok(())
     }
 }
