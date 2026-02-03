@@ -11,8 +11,24 @@ Note!
 - If you need a test payment card, you can check [emv-card-simulator](https://github.com/mrautio/emv-card-simulator) project out.
 
 ```sh
-terminalsimulator$ cargo run -- --help
+cd terminalsimulator
+cargo run -- --help
 ```
+
+### Online authorization
+
+To send an ARQC to an external Colossus switch for online authorization, use `--switch-url` and `--icc-public-key`. The switch would receive an ISO 8583 0100 message with EMV data and the ICC public key, and the terminal simulator would an ARPC with the authorization decision.
+
+```sh
+cd terminalsimulator
+cargo run -- --switch-url <SWITCH_URL> --icc-public-key <PATH_TO_ICC_KEY_DIR> \
+--amount 10000 \
+--print-tags # With debug tag printing
+```
+
+- `--switch-url` - URL of the authorization switch (e.g. `http://localhost:3000`)
+- `--icc-public-key` - Directory containing `icc_modulus.bin` and `icc_exponent.bin`
+- `--amount` - Transaction amount in cents (optional, defaults to 1)
 
 ## Library
 

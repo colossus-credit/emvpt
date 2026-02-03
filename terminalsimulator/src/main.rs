@@ -11,8 +11,12 @@ use std::{thread, time};
 
 use emvpt::*;
 
+mod iso8583;
+mod online_auth;
+
 static mut INTERACTIVE: bool = false;
 static mut PIN_OPTION: Option<String> = None;
+static mut AMOUNT_CENTS: Option<u64> = None;
 
 pub enum ReaderError {
     ReaderConnectionFailed(String),
@@ -203,7 +207,8 @@ fn amount_entry() -> Result<u64, ()> {
         );
     }
 
-    Ok(1)
+    let amount = unsafe { AMOUNT_CENTS };
+    Ok(amount.unwrap_or(1))
 }
 
 #[derive(Parser)]
@@ -246,6 +251,18 @@ struct Args {
     /// Print TLV data in human readable form
     #[arg(long, value_name = "TLV")]
     print_tlv: Option<String>,
+
+    /// Switch URL for online authorization (e.g. http://localhost:3000)
+    #[arg(long = "switch-url")]
+    switch_url: Option<String>,
+
+    /// Path to ICC public key directory (contains icc_modulus.bin, icc_exponent.bin, icc_certificate.bin, icc_remainder.bin)
+    #[arg(long = "icc-public-key")]
+    icc_public_key: Option<String>,
+
+    /// Transaction amount in cents (e.g. 10000 for $100.00)
+    #[arg(long)]
+    amount: Option<u64>,
 }
 
 fn run() -> Result<Option<String>, String> {
@@ -256,6 +273,7 @@ fn run() -> Result<Option<String>, String> {
     unsafe {
         INTERACTIVE = args.interactive;
         PIN_OPTION = args.pin;
+        AMOUNT_CENTS = args.amount;
     }
     let user_interactive = unsafe { INTERACTIVE };
     let censor_sensitive_fields = args.censor_sensitive_fields;
@@ -339,7 +357,30 @@ fn run() -> Result<Option<String>, String> {
 
         match connection.handle_1st_generate_ac().unwrap() {
             CryptogramType::AuthorisationRequestCryptogram => {
-                if let CryptogramType::TransactionCertificate =
+                if let Some(ref switch_url) = args.switch_url {
+                    let icc_key_path = args.icc_public_key.as_deref()
+                        .ok_or("--icc-public-key is required with --switch-url".to_string())?;
+
+                    match online_auth::send_arqc_to_switch(&connection, switch_url, icc_key_path) {
+                        Ok(arpc) => {
+                            if arpc.approved {
+                                if let Some(tag_91) = arpc.tag_91 {
+                                    connection.add_tag("91", tag_91);
+                                }
+                                if let CryptogramType::TransactionCertificate =
+                                    connection.handle_2nd_generate_ac().unwrap()
+                                {
+                                    purchase_successful = true;
+                                }
+                            } else {
+                                warn!("Online authorization declined");
+                            }
+                        }
+                        Err(e) => {
+                            error!("Online authorization failed: {}", e);
+                        }
+                    }
+                } else if let CryptogramType::TransactionCertificate =
                     connection.handle_2nd_generate_ac().unwrap()
                 {
                     purchase_successful = true;

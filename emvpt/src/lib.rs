@@ -1445,11 +1445,10 @@ impl EmvConnection<'_> {
                     let numeric_currency_code: String = format!("{:02X?}", v)
                         .replace(|c: char| !(c.is_ascii_alphanumeric()), "")[1..]
                         .to_string();
-                    value = format!(
-                        "{} - {}",
-                        numeric_currency_code,
-                        self.constants.numeric_currency_codes[&numeric_currency_code]
-                    );
+                    value = match self.constants.numeric_currency_codes.get(&numeric_currency_code) {
+                        Some(name) => format!("{} - {}", numeric_currency_code, name),
+                        None => format!("{} - Unknown", numeric_currency_code),
+                    };
                 }
                 Some(FieldFormat::DataObjectList) => {
                     let dol: DataObjectList =
@@ -1792,7 +1791,7 @@ impl EmvConnection<'_> {
 
         let pin_bcd_cn = bcdutil::ascii_to_bcd_cn(ascii_pin, 6).unwrap();
 
-        const PK_MAX_SIZE: usize = 248; // ref. EMV Book 2, B2.1 RSA Algorithm
+        const PK_MAX_SIZE: usize = 256; // ref. EMV Book 2, B2.1 RSA Algorithm
         let mut random_padding = [0u8; PK_MAX_SIZE];
         self.fill_random(&mut random_padding[..]);
 
