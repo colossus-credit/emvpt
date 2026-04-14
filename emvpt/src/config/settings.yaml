@@ -81,6 +81,65 @@ terminal:
     c4_kernel_version: 3
   cryptogram_type: 'AuthorisationRequestCryptogram'
   cryptogram_type_arqc: 'TransactionCertificate'
+contactless_kernels:
+  mastercard:
+    aids:
+      - aid: 'A0000009510001'
+        kernel_id: 2
+        version: '0002'
+        tac_denial: '0000000000'
+        tac_online: 'F850ACF800'
+        tac_default: 'F850ACF800'
+        floor_limit: 0
+        contactless_transaction_limit: 100000
+        contactless_transaction_limit_cdcvm: 300000
+        cvm_required_limit: 5000
+        terminal_cap_no_cvm: 'E008C8'
+        terminal_cap_cvm: 'E068C8'
+        kernel_configuration: 0
+        force_online: false
+      - aid: 'A0000000041010'
+        kernel_id: 2
+        version: '0002'
+        tac_denial: '0000000000'
+        tac_online: 'F850ACF800'
+        tac_default: 'F850ACF800'
+        floor_limit: 0
+        contactless_transaction_limit: 10000
+        contactless_transaction_limit_cdcvm: 30000
+        cvm_required_limit: 5000
+        terminal_cap_no_cvm: 'E008C8'
+        terminal_cap_cvm: 'E068C8'
+        kernel_configuration: 0
+        force_online: false
+      - aid: 'A0000000042203'
+        kernel_id: 2
+        version: '0002'
+        tac_denial: '0000000000'
+        tac_online: 'F850ACF800'
+        tac_default: 'F850ACF800'
+        floor_limit: 0
+        contactless_transaction_limit: 10000
+        contactless_transaction_limit_cdcvm: 30000
+        cvm_required_limit: 5000
+        terminal_cap_no_cvm: 'E008C8'
+        terminal_cap_cvm: 'E068C8'
+        kernel_configuration: 0
+        force_online: false
+      - aid: 'A0000000043060'
+        kernel_id: 2
+        version: '0002'
+        tac_denial: '0000000000'
+        tac_online: 'F850ACF800'
+        tac_default: 'F850ACF800'
+        floor_limit: 0
+        contactless_transaction_limit: 10000
+        contactless_transaction_limit_cdcvm: 30000
+        cvm_required_limit: 5000
+        terminal_cap_no_cvm: 'E008C8'
+        terminal_cap_cvm: 'E068C8'
+        kernel_configuration: 0
+        force_online: false
 default_tags:
   '9F1A': '0246'
   '5F2A': 0978
