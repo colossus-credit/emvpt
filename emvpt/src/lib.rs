@@ -20,6 +20,7 @@ use std::fs::{self};
 use std::str;
 
 pub mod bcdutil;
+pub mod contactless;
 
 macro_rules! get_bit {
     ($byte:expr, $bit:expr) => {
@@ -939,6 +940,8 @@ pub struct Settings {
     configuration_files: ConfigurationFiles,
     pub terminal: Terminal,
     default_tags: HashMap<String, String>,
+    #[serde(default)]
+    pub contactless_kernels: Option<contactless::kernel2::config::ContactlessKernelSettings>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1838,7 +1841,7 @@ impl EmvConnection<'_> {
         Ok(())
     }
 
-    fn handle_application_cryptogram_card_authentication(
+    pub fn handle_application_cryptogram_card_authentication(
         &mut self,
         tag_77_data: &[u8],
         cdol_tag: &str,
@@ -2295,6 +2298,51 @@ impl EmvConnection<'_> {
         self.handle_select_payment_application(&application)?;
 
         Ok(application)
+    }
+
+    /// Run a contactless transaction through the appropriate kernel
+    /// ref. EMV Contactless Book B - Entry Point Specification
+    pub fn handle_contactless_transaction(
+        &mut self,
+        application: &EmvApplication,
+    ) -> Result<contactless::OutcomeParameterSet, String> {
+        info!("Contactless transaction: dispatching to kernel for AID {:02X?}", application.aid);
+
+        let kernel_settings = self.settings.contactless_kernels.as_ref()
+            .ok_or_else(|| "No contactless kernel settings configured".to_string())?
+            .clone();
+
+        // Select and instantiate the kernel
+        let (mut kernel, preprocessing) = contactless::entry_point::select_kernel(
+            &application.aid,
+            &kernel_settings,
+            self,
+        ).map_err(|e| format!("Kernel selection failed: {}", e))?;
+
+        // Check pre-processing: if contactless not allowed, end application
+        if preprocessing.contactless_application_not_allowed {
+            return Err("Contactless application not allowed (transaction limit exceeded)".to_string());
+        }
+
+        info!("Contactless transaction: using {} (kernel ID {:02X})",
+            kernel.kernel_name(), kernel.kernel_id());
+
+        // Phase 1: Application initiation (GPO)
+        // Pass empty FCI data — the FCI was already parsed during SELECT
+        kernel.initiate_application(self, &[])
+            .map_err(|e| format!("Application initiation failed: {}", e))?;
+
+        // Phase 2: Read card data
+        let path = kernel.read_card_data(self)
+            .map_err(|e| format!("Read card data failed: {}", e))?;
+
+        // Phase 3: Process transaction
+        let outcome = kernel.process_transaction(self, path)
+            .map_err(|e| format!("Transaction processing failed: {}", e))?;
+
+        info!("Contactless transaction outcome: {}", outcome);
+
+        Ok(outcome)
     }
 
     pub fn process_settings(&mut self) -> Result<(), Box<dyn error::Error>> {

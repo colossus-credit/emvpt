@@ -482,3 +482,101 @@
   source: 'Issuer'
   min: 8
   max: 16
+
+'9F6E':
+  tag: '9F6E'
+  name: 'Third Party Data / Form Factor Indicator'
+  format: 'Binary'
+  source: 'Icc'
+
+# Kernel 2 (Mastercard Contactless) proprietary tags
+'9F6C':
+  tag: '9F6C'
+  name: 'Card Transaction Qualifiers (CTQ)'
+  format: 'Binary'
+  min: 2
+  max: 2
+  source: 'Icc'
+'DF8115':
+  tag: 'DF8115'
+  name: 'Error Indication'
+  format: 'Binary'
+  source: 'Terminal'
+'DF8116':
+  tag: 'DF8116'
+  name: 'User Interface Request Data'
+  format: 'Binary'
+  source: 'Terminal'
+'DF811B':
+  tag: 'DF811B'
+  name: 'Kernel ID'
+  format: 'Binary'
+  min: 1
+  max: 1
+  source: 'Terminal'
+'DF811D':
+  tag: 'DF811D'
+  name: 'Terminal Capabilities - Card Data Input'
+  format: 'Binary'
+  source: 'Terminal'
+'DF811E':
+  tag: 'DF811E'
+  name: 'Terminal Capabilities - CVM Required'
+  format: 'Binary'
+  source: 'Terminal'
+'DF811F':
+  tag: 'DF811F'
+  name: 'Terminal Capabilities - Security'
+  format: 'Binary'
+  source: 'Terminal'
+'DF8120':
+  tag: 'DF8120'
+  name: 'Terminal Action Code - Default (Kernel 2)'
+  format: 'Binary'
+  min: 5
+  max: 5
+  source: 'Terminal'
+'DF8121':
+  tag: 'DF8121'
+  name: 'Terminal Action Code - Denial (Kernel 2)'
+  format: 'Binary'
+  min: 5
+  max: 5
+  source: 'Terminal'
+'DF8122':
+  tag: 'DF8122'
+  name: 'Terminal Action Code - Online (Kernel 2)'
+  format: 'Binary'
+  min: 5
+  max: 5
+  source: 'Terminal'
+'DF8123':
+  tag: 'DF8123'
+  name: 'Reader Contactless Floor Limit'
+  format: 'Binary'
+  source: 'Terminal'
+'DF8124':
+  tag: 'DF8124'
+  name: 'Reader Contactless Transaction Limit (No CDCVM)'
+  format: 'Binary'
+  source: 'Terminal'
+'DF8125':
+  tag: 'DF8125'
+  name: 'Reader Contactless Transaction Limit (CDCVM)'
+  format: 'Binary'
+  source: 'Terminal'
+'DF8126':
+  tag: 'DF8126'
+  name: 'Reader CVM Required Limit'
+  format: 'Binary'
+  source: 'Terminal'
+'DF8128':
+  tag: 'DF8128'
+  name: 'IDS Status'
+  format: 'Binary'
+  source: 'Terminal'
+'DF8129':
+  tag: 'DF8129'
+  name: 'Outcome Parameter Set'
+  format: 'Binary'
+  source: 'Terminal'

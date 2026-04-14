@@ -246,6 +246,10 @@ struct Args {
     /// Print TLV data in human readable form
     #[arg(long, value_name = "TLV")]
     print_tlv: Option<String>,
+
+    /// Force contactless mode even with a contact reader
+    #[arg(long = "force-contactless", default_value_t = false)]
+    force_contactless: bool,
 }
 
 fn run() -> Result<Option<String>, String> {
@@ -313,7 +317,10 @@ fn run() -> Result<Option<String>, String> {
         return Ok(None);
     }
 
-    connection.contactless = smart_card_connection.contactless;
+    connection.contactless = smart_card_connection.contactless || args.force_contactless;
+    if args.force_contactless && !smart_card_connection.contactless {
+        info!("Force contactless mode enabled (contact reader will use contactless kernel path)");
+    }
     connection.interface = Some(&smart_card_connection);
 
     let application = connection.select_payment_application().unwrap();
@@ -324,39 +331,76 @@ fn run() -> Result<Option<String>, String> {
         bcdutil::ascii_to_bcd_n(format!("{}", purchase_amount).as_bytes(), 6).unwrap(),
     );
 
-    connection.handle_get_processing_options().unwrap();
+    if connection.contactless && connection.settings.contactless_kernels.is_some() {
+        // Contactless path: dispatch to scheme-specific kernel
+        info!("Contactless transaction detected, routing through kernel");
 
-    if !stop_after_read {
-        connection.handle_public_keys(&application).unwrap();
+        match connection.handle_contactless_transaction(&application) {
+            Ok(outcome) => {
+                use emvpt::contactless::OutcomeType;
 
-        connection.handle_card_verification_methods().unwrap();
+                info!("Contactless outcome: {}", outcome);
 
-        connection.handle_terminal_risk_management().unwrap();
-
-        connection.handle_terminal_action_analysis().unwrap();
-
-        let mut purchase_successful = false;
-
-        match connection.handle_1st_generate_ac().unwrap() {
-            CryptogramType::AuthorisationRequestCryptogram => {
-                if let CryptogramType::TransactionCertificate =
-                    connection.handle_2nd_generate_ac().unwrap()
-                {
-                    purchase_successful = true;
+                match outcome.outcome {
+                    OutcomeType::Approved => {
+                        info!("Purchase successful! (contactless offline)");
+                    }
+                    OutcomeType::OnlineRequest => {
+                        info!("Online authorization requested (contactless)");
+                        // TODO: send ARQC to switch, then 2nd GENERATE AC
+                        info!("Purchase requires online authorization");
+                    }
+                    OutcomeType::Declined => {
+                        warn!("Purchase unsuccessful! (contactless declined)");
+                    }
+                    OutcomeType::TryAnotherInterface => {
+                        warn!("Try another interface (insert chip)");
+                    }
+                    _ => {
+                        warn!("Contactless transaction ended: {:?}", outcome.outcome);
+                    }
                 }
             }
-            CryptogramType::TransactionCertificate => {
-                purchase_successful = true;
-            }
-            CryptogramType::ApplicationAuthenticationCryptogram => {
-                purchase_successful = false;
+            Err(e) => {
+                error!("Contactless transaction failed: {}", e);
             }
         }
+    } else {
+        // Contact path (or contactless without kernel config): existing generic flow
+        connection.handle_get_processing_options().unwrap();
 
-        if purchase_successful {
-            info!("Purchase successful!");
-        } else {
-            warn!("Purchase unsuccessful!");
+        if !stop_after_read {
+            connection.handle_public_keys(&application).unwrap();
+
+            connection.handle_card_verification_methods().unwrap();
+
+            connection.handle_terminal_risk_management().unwrap();
+
+            connection.handle_terminal_action_analysis().unwrap();
+
+            let mut purchase_successful = false;
+
+            match connection.handle_1st_generate_ac().unwrap() {
+                CryptogramType::AuthorisationRequestCryptogram => {
+                    if let CryptogramType::TransactionCertificate =
+                        connection.handle_2nd_generate_ac().unwrap()
+                    {
+                        purchase_successful = true;
+                    }
+                }
+                CryptogramType::TransactionCertificate => {
+                    purchase_successful = true;
+                }
+                CryptogramType::ApplicationAuthenticationCryptogram => {
+                    purchase_successful = false;
+                }
+            }
+
+            if purchase_successful {
+                info!("Purchase successful!");
+            } else {
+                warn!("Purchase unsuccessful!");
+            }
         }
     }
 
